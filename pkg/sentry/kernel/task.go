@@ -406,6 +406,11 @@ type Task struct {
 	// abstractSockets is protected by mu.
 	abstractSockets *AbstractSocketNamespace
 
+	// mounts is the task's mount namespace.
+	//
+	// mounts is immutable.
+	mounts *fs.MountNamespace
+
 	// parentDeathSignal is sent to this task's thread group when its parent exits.
 	//
 	// parentDeathSignal is protected by mu.
@@ -665,7 +670,7 @@ func (t *Task) SyscallRestartBlock() SyscallRestartBlock {
 // Preconditions: The caller must be running on the task goroutine, or t.mu
 // must be locked.
 func (t *Task) IsChrooted() bool {
-	realRoot := t.k.mounts.Root()
+	realRoot := t.mounts.Root()
 	defer realRoot.DecRef()
 	root := t.fsc.RootDirectory()
 	if root != nil {
@@ -710,7 +715,7 @@ func (t *Task) WithMuLocked(f func(*Task)) {
 // MountNamespace returns t's MountNamespace. MountNamespace does not take an
 // additional reference on the returned MountNamespace.
 func (t *Task) MountNamespace() *fs.MountNamespace {
-	return t.k.mounts
+	return t.mounts
 }
 
 // AbstractSockets returns t's AbstractSocketNamespace.
