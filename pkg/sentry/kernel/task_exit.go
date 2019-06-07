@@ -267,6 +267,7 @@ func (*runExitMain) execute(t *Task) taskRunState {
 
 	t.fsc.DecRef()
 	t.fds.DecRef()
+	t.mounts.DecRef()
 
 	// If this is the last task to exit from the thread group, release the
 	// thread group's resources.

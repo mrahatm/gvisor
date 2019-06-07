@@ -245,6 +245,9 @@ func (t *Task) Clone(opts *CloneOptions) (ThreadID, *SyscallControl, error) {
 		tg = t.k.newThreadGroup(pidns, sh, opts.TerminationSignal, tg.limits.GetCopy(), t.k.monotonicClock)
 	}
 
+	mounts := t.mounts
+	mounts.IncRef()
+
 	cfg := &TaskConfig{
 		Kernel:                  t.k,
 		ThreadGroup:             tg,
@@ -259,6 +262,7 @@ func (t *Task) Clone(opts *CloneOptions) (ThreadID, *SyscallControl, error) {
 		UTSNamespace:            utsns,
 		IPCNamespace:            ipcns,
 		AbstractSocketNamespace: t.abstractSockets,
+		MountNamespace:          mounts,
 		ContainerID:             t.ContainerID(),
 	}
 	if opts.NewThreadGroup {
