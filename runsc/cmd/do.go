@@ -134,7 +134,7 @@ func (c *Do) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) su
 
 	} else if conf.Rootless {
 		if conf.Network == boot.NetworkSandbox {
-			fmt.Println("*** Rootless requires changing network type to host ***")
+			fmt.Println("*** Warning: using host network due to --rootless ***")
 			conf.Network = boot.NetworkHost
 		}
 
@@ -164,7 +164,13 @@ func (c *Do) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) su
 		return Errorf("Error write spec: %v", err)
 	}
 
-	ws, err := container.Run(cid, spec, conf, tmpDir, "", "", "", false)
+	runArgs := &container.Args{
+		ID:        cid,
+		Spec:      spec,
+		BundleDir: tmpDir,
+		Attached:  true,
+	}
+	ws, err := container.Run(conf, runArgs)
 	if err != nil {
 		return Errorf("running container: %v", err)
 	}
