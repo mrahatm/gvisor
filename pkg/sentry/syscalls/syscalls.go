@@ -44,15 +44,6 @@ func Supported(name string, fn kernel.SyscallFn) kernel.Syscall {
 	}
 }
 
-// Undocumented returns a syscall that is undocumented.
-func Undocumented(name string, fn kernel.SyscallFn) kernel.Syscall {
-	return kernel.Syscall{
-		Name:         name,
-		Fn:           fn,
-		SupportLevel: kernel.SupportUndocumented,
-	}
-}
-
 // PartiallySupported returns a syscall that has a partial implementation.
 func PartiallySupported(name string, fn kernel.SyscallFn, note string, urls []string) kernel.Syscall {
 	return kernel.Syscall{
