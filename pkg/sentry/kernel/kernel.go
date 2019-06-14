@@ -112,11 +112,6 @@ type Kernel struct {
 	rootIPCNamespace            *IPCNamespace
 	rootAbstractSocketNamespace *AbstractSocketNamespace
 
-	// mounts holds the state of the virtual filesystem. mounts is initially
-	// nil, and must be set by calling Kernel.SetRootMountNamespace before
-	// Kernel.CreateProcess can succeed.
-	mounts *fs.MountNamespace
-
 	// futexes is the "root" futex.Manager, from which all others are forked.
 	// This is necessary to ensure that shared futexes are coherent across all
 	// tasks, including those created by CreateProcess.
@@ -381,8 +376,12 @@ func (k *Kernel) SaveTo(w io.Writer) error {
 // flushMountSourceRefs flushes the MountSources for all mounted filesystems
 // and open FDs.
 func (k *Kernel) flushMountSourceRefs() error {
-	// Flush all mount sources for currently mounted filesystems.
-	k.mounts.FlushMountSourceRefs()
+	// Flush all mount sources for currently mounted filesystems in each task.
+	k.tasks.mu.RLock()
+	k.tasks.forEachThreadGroupLocked(func(tg *ThreadGroup) {
+		tg.Leader().mounts.FlushMountSourceRefs()
+	})
+	k.tasks.mu.RUnlock()
 
 	// There may be some open FDs whose filesystems have been unmounted. We
 	// must flush those as well.
@@ -548,16 +547,6 @@ func (k *Kernel) LoadFrom(r io.Reader, net inet.Stack) error {
 	return nil
 }
 
-// Destroy releases resources owned by k.
-//
-// Preconditions: There must be no task goroutines running in k.
-func (k *Kernel) Destroy() {
-	if k.mounts != nil {
-		k.mounts.DecRef()
-		k.mounts = nil
-	}
-}
-
 // UniqueID returns a unique identifier.
 func (k *Kernel) UniqueID() uint64 {
 	id := atomic.AddUint64(&k.uniqueID, 1)
@@ -611,12 +600,18 @@ type CreateProcessArgs struct {
 	// AbstractSocketNamespace is the initial Abstract Socket namespace.
 	AbstractSocketNamespace *AbstractSocketNamespace
 
+	// MountNamespace optionally contains the mount namespace for this
+	// process. If nil, the init process's mount namespace is used.
+	//
+	// Anyone setting MountNamespace must donate a reference (i.e.
+	// increment it).
+	MountNamespace *fs.MountNamespace
+
 	// Root optionally contains the dirent that serves as the root for the
 	// process. If nil, the mount namespace's root is used as the process'
 	// root.
 	//
-	// Anyone setting Root must donate a reference (i.e. increment it) to
-	// keep it alive until it is decremented by CreateProcess.
+	// Anyone setting Root must donate a reference (i.e. increment it).
 	Root *fs.Dirent
 
 	// ContainerID is the container that the process belongs to.
@@ -664,10 +659,10 @@ func (ctx *createProcessContext) Value(key interface{}) interface{} {
 			ctx.args.Root.IncRef()
 			return ctx.args.Root
 		}
-		if ctx.k.mounts != nil {
-			// MountNamespace.Root() will take a reference on the
-			// root dirent for us.
-			return ctx.k.mounts.Root()
+		if ctx.args.MountNamespace != nil {
+			// MountNamespace.Root() will take a reference on the root
+			// dirent for us.
+			return ctx.args.MountNamespace.Root()
 		}
 		return nil
 	case fs.CtxDirentCacheLimiter:
@@ -711,31 +706,33 @@ func (k *Kernel) CreateProcess(args CreateProcessArgs) (*ThreadGroup, ThreadID, 
 	defer k.extMu.Unlock()
 	log.Infof("EXEC: %v", args.Argv)
 
-	if k.mounts == nil {
-		return nil, 0, fmt.Errorf("no kernel MountNamespace")
-	}
-
 	tg := k.newThreadGroup(k.tasks.Root, NewSignalHandlers(), linux.SIGCHLD, args.Limits, k.monotonicClock)
 	ctx := args.NewContext(k)
+
+	// Grab the mount namespace.
+	mns := args.MountNamespace
+	if mns == nil {
+		mns = k.GlobalInit().Leader().MountNamespace()
+		mns.IncRef()
+	}
 
 	// Grab the root directory.
 	root := args.Root
 	if root == nil {
-		root = fs.RootFromContext(ctx)
-		// Is the root STILL nil?
-		if root == nil {
-			return nil, 0, fmt.Errorf("CreateProcessArgs.Root was not provided, and failed to get root from context")
-		}
+		// If no Root was configured, then get it from the
+		// MountNamespace.
+		root = mns.Root()
 	}
+	// The call to newFSContext below will take a reference on root, so we
+	// don't need to hold this one.
 	defer root.DecRef()
-	args.Root = nil
 
 	// Grab the working directory.
 	remainingTraversals := uint(args.MaxSymlinkTraversals)
 	wd := root // Default.
 	if args.WorkingDirectory != "" {
 		var err error
-		wd, err = k.mounts.FindInode(ctx, root, nil, args.WorkingDirectory, &remainingTraversals)
+		wd, err = mns.FindInode(ctx, root, nil, args.WorkingDirectory, &remainingTraversals)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to find initial working directory %q: %v", args.WorkingDirectory, err)
 		}
@@ -755,7 +752,7 @@ func (k *Kernel) CreateProcess(args CreateProcessArgs) (*ThreadGroup, ThreadID, 
 
 	// Create a fresh task context.
 	remainingTraversals = uint(args.MaxSymlinkTraversals)
-	tc, se := k.LoadTaskImage(ctx, k.mounts, root, wd, &remainingTraversals, args.Filename, args.Argv, args.Envv, k.featureSet)
+	tc, se := k.LoadTaskImage(ctx, mns, root, wd, &remainingTraversals, args.Filename, args.Argv, args.Envv, k.featureSet)
 	if se != nil {
 		return nil, 0, errors.New(se.String())
 	}
@@ -773,6 +770,7 @@ func (k *Kernel) CreateProcess(args CreateProcessArgs) (*ThreadGroup, ThreadID, 
 		FDMap:                   args.FDMap,
 		Credentials:             args.Credentials,
 		AllowedCPUMask:          sched.NewFullCPUSet(k.applicationCores),
+		MountNamespace:          mns,
 		UTSNamespace:            args.UTSNamespace,
 		IPCNamespace:            args.IPCNamespace,
 		AbstractSocketNamespace: args.AbstractSocketNamespace,
@@ -994,20 +992,6 @@ func (k *Kernel) RootAbstractSocketNamespace() *AbstractSocketNamespace {
 	return k.rootAbstractSocketNamespace
 }
 
-// RootMountNamespace returns the MountNamespace.
-func (k *Kernel) RootMountNamespace() *fs.MountNamespace {
-	k.extMu.Lock()
-	defer k.extMu.Unlock()
-	return k.mounts
-}
-
-// SetRootMountNamespace sets the MountNamespace.
-func (k *Kernel) SetRootMountNamespace(mounts *fs.MountNamespace) {
-	k.extMu.Lock()
-	defer k.extMu.Unlock()
-	k.mounts = mounts
-}
-
 // NetworkStack returns the network stack. NetworkStack may return nil if no
 // network stack is available.
 func (k *Kernel) NetworkStack() inet.Stack {
@@ -1208,7 +1192,7 @@ func (ctx supervisorContext) Value(key interface{}) interface{} {
 		// The supervisor context is global root.
 		return auth.NewRootCredentials(ctx.k.rootUserNamespace)
 	case fs.CtxRoot:
-		return ctx.k.mounts.Root()
+		return ctx.k.globalInit.Leader().mounts.Root()
 	case fs.CtxDirentCacheLimiter:
 		return ctx.k.DirentCacheLimiter
 	case ktime.CtxRealtimeClock:
