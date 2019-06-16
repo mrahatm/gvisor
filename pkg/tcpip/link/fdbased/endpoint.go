@@ -380,15 +380,19 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, hdr buffer.Prepen
 				vnetHdr.gsoSize = gso.MSS
 			}
 		}
-
-		return rawfile.NonBlockingWrite3(e.fds[0], vnetHdrBuf, hdr.View(), payload.ToView())
+		payloadView := payload.ToView()
+		err := rawfile.NonBlockingWrite3(e.fds[0], vnetHdrBuf, hdr.View(), payloadView)
+		buffer.PutView(payloadView)
+		return err
 	}
 
 	if payload.Size() == 0 {
 		return rawfile.NonBlockingWrite(e.fds[0], hdr.View())
 	}
-
-	return rawfile.NonBlockingWrite3(e.fds[0], hdr.View(), payload.ToView(), nil)
+	payloadView := payload.ToView()
+	err := rawfile.NonBlockingWrite3(e.fds[0], hdr.View(), payloadView, nil)
+	buffer.PutView(payloadView)
+	return err
 }
 
 // WriteRawPacket writes a raw packet directly to the file descriptor.

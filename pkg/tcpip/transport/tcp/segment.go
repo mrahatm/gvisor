@@ -26,21 +26,13 @@ import (
 
 // segment represents a TCP segment. It holds the payload and parsed TCP segment
 // information, and can be added to intrusive lists.
-// segment is mostly immutable, the only field allowed to change is viewToDeliver.
 //
 // +stateify savable
 type segment struct {
 	segmentEntry
-	refCnt int32
-	id     stack.TransportEndpointID `state:"manual"`
-	route  stack.Route               `state:"manual"`
-	data   buffer.VectorisedView     `state:".(buffer.VectorisedView)"`
-	// views is used as buffer for data when its length is large
-	// enough to store a VectorisedView.
-	views [8]buffer.View `state:"nosave"`
-	// viewToDeliver keeps track of the next View that should be
-	// delivered by the Read endpoint.
-	viewToDeliver  int
+	refCnt         int32
+	id             stack.TransportEndpointID `state:"manual"`
+	route          stack.Route               `state:"manual"`
 	sequenceNumber seqnum.Value
 	ackNumber      seqnum.Value
 	flags          uint8
@@ -57,7 +49,8 @@ type segment struct {
 	rcvdTime       time.Time `state:".(unixTime)"`
 	// xmitTime is the last transmit time of this segment. A zero value
 	// indicates that the segment has yet to be transmitted.
-	xmitTime time.Time `state:".(unixTime)"`
+	xmitTime time.Time             `state:".(unixTime)"`
+	data     buffer.VectorisedView `state:".(buffer.VectorisedView)"`
 }
 
 func newSegment(r *stack.Route, id stack.TransportEndpointID, vv buffer.VectorisedView) *segment {
@@ -66,7 +59,7 @@ func newSegment(r *stack.Route, id stack.TransportEndpointID, vv buffer.Vectoris
 		id:     id,
 		route:  r.Clone(),
 	}
-	s.data = vv.Clone(s.views[:])
+	s.data = vv.Clone(nil)
 	s.rcvdTime = time.Now()
 	return s
 }
@@ -77,8 +70,7 @@ func newSegmentFromView(r *stack.Route, id stack.TransportEndpointID, v buffer.V
 		id:     id,
 		route:  r.Clone(),
 	}
-	s.views[0] = v
-	s.data = buffer.NewVectorisedView(len(v), s.views[:1])
+	s.data = buffer.NewVectorisedView(len(v), []buffer.View{v})
 	s.rcvdTime = time.Now()
 	return s
 }
@@ -92,10 +84,9 @@ func (s *segment) clone() *segment {
 		flags:          s.flags,
 		window:         s.window,
 		route:          s.route.Clone(),
-		viewToDeliver:  s.viewToDeliver,
 		rcvdTime:       s.rcvdTime,
 	}
-	t.data = s.data.Clone(t.views[:])
+	t.data = s.data.Clone(nil)
 	return t
 }
 
@@ -105,6 +96,18 @@ func (s *segment) flagIsSet(flag uint8) bool {
 
 func (s *segment) decRef() {
 	if atomic.AddInt32(&s.refCnt, -1) == 0 {
+		// // Clear buffers for outbound segments if and only if
+		// // they were not looped back.
+		// if !s.route.IsLooped() && !s.xmitTime.IsZero() {
+		// 	// Return buffers to the pool for segments that were
+		// 	// destined to a remote endpoint where we can be certain
+		// 	// that nothing in the local stack is holding a
+		// 	// reference to any of these slices.
+		// 	for v := s.data.First(); v != nil; v = s.data.First() {
+		// 		buffer.PutView(v)
+		// 		s.data.RemoveFirst()
+		// 	}
+		// }
 		s.route.Release()
 	}
 }
@@ -137,7 +140,6 @@ func (s *segment) logicalLen() seqnum.Size {
 // the csum and csumValid fields of the segment.
 func (s *segment) parse() bool {
 	h := header.TCP(s.data.First())
-
 	// h is the header followed by the payload. We check that the offset to
 	// the data respects the following constraints:
 	// 1. That it's at least the minimum header size; if we don't do this
@@ -183,4 +185,12 @@ func (s *segment) parse() bool {
 // sackBlock returns a header.SACKBlock that represents this segment.
 func (s *segment) sackBlock() header.SACKBlock {
 	return header.SACKBlock{s.sequenceNumber, s.sequenceNumber.Add(s.logicalLen())}
+}
+
+// first() returns the first view in segment.data and removes it from data.
+func (s *segment) first() (v buffer.View, hasMore bool) {
+	v = s.data.First()
+	s.data.RemoveFirst()
+	hasMore = s.data.Size() != 0
+	return v, hasMore
 }

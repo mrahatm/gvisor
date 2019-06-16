@@ -480,7 +480,7 @@ func (n *NIC) DeliverNetworkPacket(linkEP LinkEndpoint, remote, _ tcpip.LinkAddr
 		n.mu.RLock()
 		for _, ref := range n.endpoints {
 			if ref.protocol == header.IPv4ProtocolNumber && ref.tryIncRef() {
-				r := makeRoute(protocol, dst, src, linkEP.LinkAddress(), ref, false /* handleLocal */, false /* multicastLoop */)
+				r := makeRoute(n.stack, protocol, dst, src, linkEP.LinkAddress(), ref, false /* handleLocal */, false /* multicastLoop */)
 				r.RemoteLinkAddress = remote
 				ref.ep.HandlePacket(&r, vv)
 				ref.decRef()
@@ -491,7 +491,7 @@ func (n *NIC) DeliverNetworkPacket(linkEP LinkEndpoint, remote, _ tcpip.LinkAddr
 	}
 
 	if ref := n.getRef(protocol, dst); ref != nil {
-		r := makeRoute(protocol, dst, src, linkEP.LinkAddress(), ref, false /* handleLocal */, false /* multicastLoop */)
+		r := makeRoute(n.stack, protocol, dst, src, linkEP.LinkAddress(), ref, false /* handleLocal */, false /* multicastLoop */)
 		r.RemoteLinkAddress = remote
 		ref.ep.HandlePacket(&r, vv)
 		ref.decRef()

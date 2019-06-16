@@ -362,7 +362,8 @@ func (c *Conn) Write(b []byte) (int, error) {
 	default:
 	}
 
-	v := buffer.NewViewFromBytes(b)
+	v := buffer.NewView(len(b))
+	copy(v, b)
 
 	// We must handle two soft failure conditions simultaneously:
 	//  1. Write may write nothing and return tcpip.ErrWouldBlock.
@@ -381,7 +382,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 		reg      bool
 		notifyCh chan struct{}
 	)
-	for nbytes < len(b) && (err == tcpip.ErrWouldBlock || err == nil) {
+	for nbytes < len(v) && (err == tcpip.ErrWouldBlock || err == nil) {
 		if err == tcpip.ErrWouldBlock {
 			if !reg {
 				// Only register once.

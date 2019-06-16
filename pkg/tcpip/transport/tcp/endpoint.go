@@ -710,11 +710,8 @@ func (e *endpoint) readLocked() (buffer.View, *tcpip.Error) {
 	}
 
 	s := e.rcvList.Front()
-	views := s.data.Views()
-	v := views[s.viewToDeliver]
-	s.viewToDeliver++
-
-	if s.viewToDeliver >= len(views) {
+	v, hasMore := s.first()
+	if !hasMore {
 		e.rcvList.Remove(s)
 		s.decRef()
 	}
@@ -829,7 +826,7 @@ func (e *endpoint) Peek(vec [][]byte) (uintptr, tcpip.ControlMessages, *tcpip.Er
 	for s := e.rcvList.Front(); s != nil; s = s.Next() {
 		views := s.data.Views()
 
-		for i := s.viewToDeliver; i < len(views); i++ {
+		for i := 0; i < len(views); i++ {
 			v := views[i]
 
 			for len(v) > 0 {

@@ -15,13 +15,135 @@
 // Package buffer provides the implementation of a buffer view.
 package buffer
 
+import (
+	"log"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
 // View is a slice of a buffer, with convenience methods.
 type View []byte
+
+type counter struct {
+	count int64
+}
+
+func (c *counter) inc() {
+	atomic.AddInt64(&c.count, 1)
+}
+
+func (c *counter) get() int64 {
+	return atomic.LoadInt64(&c.count)
+}
+
+// overall memory allocation metrics, metrics must be accessed
+// using atomic operations.
+var viewPoolAllocationMetrics = struct {
+	// Number of allocations made from one of the pools.
+	allocations *counter
+
+	// Number of deallocations where the allocation was returned to a pool.
+	deallocations *counter
+
+	// Number of allocations that were not served by a pool.
+	largeAllocations *counter
+
+	// Number of large deallocations that were not returned to a pool.
+	largeDeallocations *counter
+
+	// Number of small allocations that were not returned to a pool.
+	smallDeallocations *counter
+}{&counter{}, &counter{}, &counter{}, &counter{}, &counter{}}
+
+type poolInfo struct {
+	sz   int
+	pool sync.Pool
+	// pool metrics must be accessed atomically
+	allocations   *counter
+	deallocations *counter
+}
+
+var viewPools = []poolInfo{
+	{64, sync.Pool{New: func() interface{} { return make(View, 64) }}, new(counter), new(counter)},
+	{128, sync.Pool{New: func() interface{} { return make(View, 128) }}, new(counter), new(counter)},
+	{256, sync.Pool{New: func() interface{} { return make(View, 256) }}, new(counter), new(counter)},
+	{512, sync.Pool{New: func() interface{} { return make(View, 512) }}, new(counter), new(counter)},
+	{1024, sync.Pool{New: func() interface{} { return make(View, 1024) }}, new(counter), new(counter)},
+	{2048, sync.Pool{New: func() interface{} { return make(View, 2048) }}, new(counter), new(counter)},
+	{4096, sync.Pool{New: func() interface{} { return make(View, 4096) }}, new(counter), new(counter)},
+	{8192, sync.Pool{New: func() interface{} { return make(View, 8192) }}, new(counter), new(counter)},
+	{16384, sync.Pool{New: func() interface{} { return make(View, 16384) }}, new(counter), new(counter)},
+	{32768, sync.Pool{New: func() interface{} { return make(View, 32768) }}, new(counter), new(counter)},
+	{65536, sync.Pool{New: func() interface{} { return make(View, 65536) }}, new(counter), new(counter)},
+	{131072, sync.Pool{New: func() interface{} { return make(View, 131072) }}, new(counter), new(counter)},
+	{262144, sync.Pool{New: func() interface{} { return make(View, 262144) }}, new(counter), new(counter)},
+}
+
+var printerStarted int64
+
+func printPoolStats() {
+	t := time.NewTicker(1 * time.Second)
+	defer t.Stop()
+	stats := &viewPoolAllocationMetrics
+	for {
+		<-t.C
+		log.Printf("viewPoolAddress: %p, stats: %p", &viewPoolAllocationMetrics, stats)
+		log.Printf("allocations: %d, deallocations: %d, largeAllocations: %d, largeDeallocations: %d, smallDeallocations: %d", stats.allocations.get(), stats.deallocations.get(), stats.largeAllocations.get(), stats.largeDeallocations.get(), stats.smallDeallocations.get())
+		for i := 0; i < len(viewPools); i++ {
+			log.Printf("Pool SZ: %d, allocations: %d, deallocations: %d", viewPools[i].sz, viewPools[i].allocations.get(), viewPools[i].deallocations.get())
+		}
+	}
+}
 
 // NewView allocates a new buffer and returns an initialized view that covers
 // the whole buffer.
 func NewView(size int) View {
-	return make(View, size)
+	if atomic.CompareAndSwapInt64(&printerStarted, 0, 1) {
+		go printPoolStats()
+	}
+	stats := &viewPoolAllocationMetrics
+	if size > viewPools[len(viewPools)-1].sz {
+		stats.largeAllocations.inc()
+		return make(View, size)
+	}
+	i := 0
+	for ; i < len(viewPools); i++ {
+		if size <= viewPools[i].sz {
+			break
+		}
+	}
+	stats.allocations.inc()
+	viewPools[i].allocations.inc()
+	v := viewPools[i].pool.Get().(View)
+	for i := range v {
+		v[i] = 0
+	}
+	v = v[:size]
+	return v
+}
+
+// PutView returns a view to the buffer pool.
+func PutView(v View) {
+	stats := &viewPoolAllocationMetrics
+	if len(v) > viewPools[len(viewPools)-1].sz {
+		// Let GC handle the large allocation.
+		stats.largeAllocations.inc()
+		return
+	}
+	// Return the buffer to the pool which is of a smaller size
+	// than the view length but closest to it.
+	for i := len(viewPools) - 1; i >= 0; i-- {
+		if len(v) >= viewPools[i].sz {
+			stats.deallocations.inc()
+			viewPools[i].deallocations.inc()
+			viewPools[i].pool.Put(v)
+			return
+		}
+	}
+	stats.smallDeallocations.inc()
+	// If the allocation is now smaller than the smallest pool size
+	// just let GC handle it.
 }
 
 // NewViewFromBytes allocates a new buffer and copies in the given bytes.
@@ -136,10 +258,10 @@ func (vv VectorisedView) Size() int {
 // If the vectorised view contains a single view, that view will be returned
 // directly.
 func (vv VectorisedView) ToView() View {
-	if len(vv.views) == 1 {
-		return vv.views[0]
-	}
-	u := make([]byte, 0, vv.size)
+	// if len(vv.views) == 1 {
+	// 	return vv.views[0]
+	// }
+	u := NewView(vv.size)[:0] // make([]byte, 0, vv.size)
 	for _, v := range vv.views {
 		u = append(u, v...)
 	}
@@ -155,4 +277,11 @@ func (vv VectorisedView) Views() []View {
 func (vv *VectorisedView) Append(vv2 VectorisedView) {
 	vv.views = append(vv.views, vv2.views...)
 	vv.size += vv2.size
+}
+
+// Prepend  puts the view in front of the other views in the vectorised view.
+func (vv *VectorisedView) Prepend(v View) {
+	views := append([]View{}, v)
+	vv.views = append(views, vv.views...)
+	vv.size += len(v)
 }

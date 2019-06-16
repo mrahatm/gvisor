@@ -49,13 +49,16 @@ type Route struct {
 
 	// loop controls where WritePacket should send packets.
 	loop PacketLooping
+
+	// stk is a reference to the stack that owns this route.
+	stk *Stack
 }
 
 // makeRoute initializes a new route. It takes ownership of the provided
 // reference to a network endpoint.
-func makeRoute(netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr tcpip.Address, localLinkAddr tcpip.LinkAddress, ref *referencedNetworkEndpoint, handleLocal, multicastLoop bool) Route {
+func makeRoute(stk *Stack, netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr tcpip.Address, localLinkAddr tcpip.LinkAddress, ref *referencedNetworkEndpoint, handleLocal, multicastLoop bool) Route {
 	loop := PacketOut
-	if handleLocal && localAddr != "" && remoteAddr == localAddr {
+	if handleLocal && localAddr != "" && (stk.CheckLocalAddress(0, netProto, remoteAddr) != 0 && stk.CheckLocalAddress(0, netProto, localAddr) != 0) {
 		loop = PacketLoop
 	} else if multicastLoop && (header.IsV4MulticastAddress(remoteAddr) || header.IsV6MulticastAddress(remoteAddr)) {
 		loop |= PacketLoop
@@ -68,6 +71,7 @@ func makeRoute(netProto tcpip.NetworkProtocolNumber, localAddr, remoteAddr tcpip
 		RemoteAddress:    remoteAddr,
 		ref:              ref,
 		loop:             loop,
+		stk:              stk,
 	}
 }
 
@@ -196,4 +200,15 @@ func (r *Route) MakeLoopedRoute() Route {
 		l.RemoteLinkAddress = l.LocalLinkAddress
 	}
 	return l
+}
+
+// IsLooped returns true if the packets written via this loop need to be looped
+// back to another endpoint on the same stack.
+func (r *Route) IsLooped() bool {
+	// In case of save/restore routes are not saved. In such cases references
+	// to routes may not be initialized and stk pointer may not be set.
+	if r.stk == nil {
+		return true
+	}
+	return r.loop&PacketLoop != 0
 }

@@ -22,26 +22,12 @@ import (
 
 // saveData is invoked by stateify.
 func (s *segment) saveData() buffer.VectorisedView {
-	// We cannot save s.data directly as s.data.views may alias to s.views,
-	// which is not allowed by state framework (in-struct pointer).
-	v := make([]buffer.View, len(s.data.Views()))
-	// For views already delivered, we cannot save them directly as they may
-	// have already been sliced and saved elsewhere (e.g., readViews).
-	for i := 0; i < s.viewToDeliver; i++ {
-		v[i] = append([]byte(nil), s.data.Views()[i]...)
-	}
-	for i := s.viewToDeliver; i < len(v); i++ {
-		v[i] = s.data.Views()[i]
-	}
-	return buffer.NewVectorisedView(s.data.Size(), v)
+	vv := s.data.Clone(nil)
+	return vv
 }
 
 // loadData is invoked by stateify.
 func (s *segment) loadData(data buffer.VectorisedView) {
-	// NOTE: We cannot do the s.data = data.Clone(s.views[:]) optimization
-	// here because data.views is not guaranteed to be loaded by now. Plus,
-	// data.views will be allocated anyway so there really is little point
-	// of utilizing s.views for data.views.
 	s.data = data
 }
 
