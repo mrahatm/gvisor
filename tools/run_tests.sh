@@ -90,6 +90,10 @@ build_everything() {
   bazel build \
     -c "${FLAVOR}" "${BAZEL_BUILD_RBE_FLAGS[@]}" \
     "${BUILD_PACKAGES[@]}"
+
+  # make_deb.py is incompatible with Python3.
+  # https://github.com/bazelbuild/bazel/issues/8443
+  bazel build --host_force_python=py2 runsc:runsc-debian
 }
 
 # Run simple tests runs the tests that require no special setup or
